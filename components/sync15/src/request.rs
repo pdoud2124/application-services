@@ -416,7 +416,7 @@ where
             }
         };
 
-        if want_commit || self.batch == BatchState::Unsupported {
+        if want_commit{
             self.last_modified = last_modified;
         }
 

@@ -24,7 +24,10 @@ struct LimitTracker {
     cur_records: usize,
 }
 
+// The implementation for the limit, allowing for a new limit,
+// to reset the limit, and keep track of records count in the queue
 impl LimitTracker {
+    // creates a new limit
     pub fn new(max_bytes: usize, max_records: usize) -> LimitTracker {
         LimitTracker {
             max_bytes,
@@ -34,21 +37,25 @@ impl LimitTracker {
         }
     }
 
+    // resets the limit count
     pub fn clear(&mut self) {
         self.cur_records = 0;
         self.cur_bytes = 0;
     }
 
+    // checks if there is space in the queue for a new record
     pub fn can_add_record(&self, payload_size: usize) -> bool {
         // Desktop does the cur_bytes check as exclusive, but we shouldn't see any servers that
         // don't have https://github.com/mozilla-services/server-syncstorage/issues/73
         self.cur_records < self.max_records && self.cur_bytes + payload_size <= self.max_bytes
     }
 
+    // returns a boolean based on the size of a record versus the max space in the queue
     pub fn can_never_add(&self, record_size: usize) -> bool {
         record_size >= self.max_bytes
     }
 
+    // updates the count after a record is added
     pub fn record_added(&mut self, record_size: usize) {
         assert!(
             self.can_add_record(record_size),
@@ -98,6 +105,7 @@ fn default_max_record_payload_bytes() -> usize {
     256 * 1024
 }
 
+// Creates a default instance for the info configuration
 impl Default for InfoConfiguration {
     #[inline]
     fn default() -> InfoConfiguration {
@@ -129,6 +137,7 @@ impl Deref for InfoCollections {
     }
 }
 
+// A struct to upload the result of a batch
 #[derive(Debug, Clone, Deserialize)]
 pub struct UploadResult {
     batch: Option<String>,
@@ -142,13 +151,14 @@ pub struct UploadResult {
 
 pub type PostResponse = Sync15ClientResponse<UploadResult>;
 
+//REMOVE BatchState Unnsupported for issue 1144
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum BatchState {
-    Unsupported,
     NoBatch,
     InBatch(String),
 }
 
+// The struct holding all the options for the queue
 #[derive(Debug)]
 pub struct PostQueue<Post, OnResponse> {
     poster: Post,
@@ -162,6 +172,7 @@ pub struct PostQueue<Post, OnResponse> {
     last_modified: ServerTimestamp,
 }
 
+// How to deal with a batch
 pub trait BatchPoster {
     /// Note: Last argument (reference to the batch poster) is provided for the purposes of testing
     /// Important: Poster should not report non-success HTTP statuses as errors!!
@@ -182,6 +193,7 @@ pub trait PostResponseHandler {
     fn handle_response(&mut self, r: PostResponse, mid_batch: bool) -> Result<()>;
 }
 
+// A struct defining responses for the batch poster
 #[derive(Debug, Clone)]
 pub(crate) struct NormalResponseHandler {
     pub failed_ids: Vec<Guid>,
@@ -191,6 +203,7 @@ pub(crate) struct NormalResponseHandler {
     pub pending_success: Vec<Guid>,
 }
 
+// The implementation of handling responses for the batcher
 impl NormalResponseHandler {
     pub fn new(allow_failed: bool) -> NormalResponseHandler {
         NormalResponseHandler {
@@ -203,6 +216,8 @@ impl NormalResponseHandler {
     }
 }
 
+// This implementation puts the responses into arrays so they can
+// be accessed after a batch is handled
 impl PostResponseHandler for NormalResponseHandler {
     fn handle_response(&mut self, r: PostResponse, mid_batch: bool) -> error::Result<()> {
         match r {
@@ -227,6 +242,7 @@ impl PostResponseHandler for NormalResponseHandler {
     }
 }
 
+// The main function that posts the batch queue
 impl<Poster, OnResponse> PostQueue<Poster, OnResponse>
 where
     Poster: BatchPoster,
@@ -251,17 +267,21 @@ where
         }
     }
 
+    // UPDATED TO NOT ALLOW UNSUPPORTED BATCHSTATE
+    // Determines if there is a batch
     #[inline]
     fn in_batch(&self) -> bool {
         match &self.batch {
-            BatchState::Unsupported | BatchState::NoBatch => false,
+            BatchState::NoBatch => false,
             _ => true,
         }
     }
 
+    // This puts an item into the batch queue
     pub fn enqueue(&mut self, record: &EncryptedBso) -> Result<bool> {
         let payload_length = record.payload.serialized_len();
 
+        // Checks on payload_lengths and bytes
         if self.post_limits.can_never_add(payload_length)
             || self.batch_limits.can_never_add(payload_length)
             || payload_length >= self.max_payload_bytes
@@ -337,6 +357,7 @@ where
         Ok(true)
     }
 
+    // This flushes/clears certain parts of the batch based on parameters
     pub fn flush(&mut self, want_commit: bool) -> Result<()> {
         if self.queued.is_empty() {
             assert!(
@@ -349,8 +370,6 @@ where
 
         self.queued.push(b']');
         let batch_id = match &self.batch {
-            // Not the first post and we know we have no batch semantics.
-            BatchState::Unsupported => None,
             // First commit in possible batch
             BatchState::NoBatch => Some("true".into()),
             // In a batch and we have a batch id.
@@ -375,7 +394,8 @@ where
 
         self.queued.truncate(0);
 
-        if want_commit || self.batch == BatchState::Unsupported {
+        //Updated to take away unsupported batchstate
+        if want_commit{
             self.batch_limits.clear();
         }
         self.post_limits.clear();
@@ -455,6 +475,7 @@ where
     }
 }
 
+// A struct used for each piece of information uploaded
 #[derive(Clone)]
 pub struct UploadInfo {
     pub successful_ids: Vec<Guid>,
@@ -462,6 +483,7 @@ pub struct UploadInfo {
     pub modified_timestamp: ServerTimestamp,
 }
 
+// The response of an uploaded queue is recorded here
 impl<Poster> PostQueue<Poster, NormalResponseHandler> {
     // TODO: should take by move
     pub fn completed_upload_info(&mut self) -> UploadInfo {
@@ -500,6 +522,8 @@ mod test {
     use std::collections::VecDeque;
     use std::rc::Rc;
     use url::Url;
+
+    // test that the url is compiled correctly
     #[test]
     fn test_url_building() {
         let base = Url::parse("https://example.com/sync").unwrap();
@@ -586,6 +610,7 @@ mod test {
         cfg: InfoConfiguration,
     }
 
+    // An implementation that tests posting a batch
     type TestPosterRef = Rc<RefCell<TestPoster>>;
     impl TestPoster {
         pub fn new<T>(cfg: &InfoConfiguration, responses: T) -> TestPosterRef
@@ -721,6 +746,7 @@ mod test {
 
     type MockedPostQueue = PostQueue<TestPosterRef, TestPosterRef>;
 
+    // this tests the setup of the postqueue
     fn pq_test_setup(
         cfg: InfoConfiguration,
         lm: i64,
@@ -731,6 +757,7 @@ mod test {
         (pq, tester)
     }
 
+    // tests giving a response to posting a successful batch
     fn fake_response<'a, T: Into<Option<&'a str>>>(status: u16, lm: i64, batch: T) -> PostResponse {
         assert!(status_codes::is_success_code(status));
         Sync15ClientResponse::Success {
@@ -805,6 +832,7 @@ mod test {
             .sum::<usize>()
     }
 
+    // Runs a series of tests on a postqueue
     #[test]
     fn test_pq_basic() {
         let cfg = InfoConfiguration {
@@ -835,6 +863,8 @@ mod test {
         );
     }
 
+    // Tests maxing out a postqueue and tests that
+    // all the error catching works properly
     #[test]
     fn test_pq_max_request_bytes_no_batch() {
         let cfg = InfoConfiguration {
@@ -883,6 +913,8 @@ mod test {
         );
     }
 
+    // Does the same as the previous test, but with records
+    // instead of requests
     #[test]
     fn test_pq_max_record_payload_bytes_no_batch() {
         let cfg = InfoConfiguration {
@@ -921,6 +953,7 @@ mod test {
         );
     }
 
+    // Testing if a single batch works
     #[test]
     fn test_pq_single_batch() {
         let cfg = InfoConfiguration::default();
@@ -956,6 +989,7 @@ mod test {
         );
     }
 
+    // Tests multiple batches of certain sizes
     #[test]
     fn test_pq_multi_post_batch_bytes() {
         let cfg = InfoConfiguration {
@@ -1005,6 +1039,8 @@ mod test {
         );
     }
 
+    // Runs the same test as above, but with records
+    // instead of size
     #[test]
     fn test_pq_multi_post_batch_records() {
         let cfg = InfoConfiguration {
@@ -1069,6 +1105,8 @@ mod test {
         );
     }
 
+    // Tests running multiple post queues on multiple batches,
+    // tests it specifically changing records
     #[test]
     #[allow(clippy::cognitive_complexity)]
     fn test_pq_multi_post_multi_batch_records() {
@@ -1153,6 +1191,8 @@ mod test {
         );
     }
 
+    // Tests running multiple post queues on multiple batches,
+    // tests it specifically changing bytes
     #[test]
     #[allow(clippy::cognitive_complexity)]
     fn test_pq_multi_post_multi_batch_bytes() {

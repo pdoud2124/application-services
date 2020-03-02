@@ -137,7 +137,7 @@ impl Deref for InfoCollections {
     }
 }
 
-// A struct to upload the result of a batch
+// A struct to upload the result of a batch request
 #[derive(Debug, Clone, Deserialize)]
 pub struct UploadResult {
     batch: Option<String>,

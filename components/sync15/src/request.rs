@@ -321,6 +321,8 @@ where
         // The + 1 is only relevant for the final record, which will have a trailing ']'.
         let item_len = item_end - item_start + 1;
 
+        // Catches errors if the item being put into the batch
+        // is too big for the batch
         if item_len >= self.max_request_bytes {
             self.queued.truncate(item_start);
             log::warn!(
@@ -334,6 +336,8 @@ where
         let can_batch_record = self.batch_limits.can_add_record(payload_length);
         let can_send_record = self.queued.len() < self.max_request_bytes;
 
+        // If any of the limits have been breached,
+        // flush the queue of the item breaching the limit
         if !can_post_record || !can_send_record || !can_batch_record {
             log::debug!(
                 "PostQueue flushing! (can_post = {}, can_send = {}, can_batch = {})",
@@ -351,6 +355,8 @@ where
             serde_json::to_writer(&mut self.queued, &record).unwrap();
         }
 
+        // If all the error checks pass,
+        // update the current limits
         self.post_limits.record_added(payload_length);
         self.batch_limits.record_added(payload_length);
 
@@ -402,6 +408,8 @@ where
 
         let resp = resp_or_error?;
 
+        // A match case for the response from the client,
+        // updating the three param variables for each request
         let (status, last_modified, record) = match resp {
             Sync15ClientResponse::Success {
                 status,
@@ -427,6 +435,7 @@ where
             return Ok(());
         }
 
+        // Error handling for a failed batch
         if status != status_codes::ACCEPTED {
             if self.in_batch() {
                 return Err(ErrorKind::ServerBatchProblem(
@@ -449,6 +458,7 @@ where
             })?
             .clone();
 
+        // Error handling for a batch failing mid batch
         match &self.batch {
             BatchState::Unsupported => {
                 log::warn!("Server changed its mind about supporting batching mid-batch...");
@@ -513,6 +523,7 @@ impl<Poster> PostQueue<Poster, NormalResponseHandler> {
     }
 }
 
+// All the tests for the batching code
 #[cfg(test)]
 mod test {
     use super::*;

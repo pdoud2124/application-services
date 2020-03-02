@@ -435,7 +435,8 @@ where
                 .into());
             }
             self.last_modified = last_modified;
-            self.batch = BatchState::Unsupported;
+            //Changed BatchState from Unsupported to NoBatch. Does this work?
+            self.batch = BatchState::NoBatch;
             self.batch_limits.clear();
             self.on_response.handle_response(resp, false)?;
             return Ok(());
@@ -450,10 +451,6 @@ where
             .clone();
 
         match &self.batch {
-            BatchState::Unsupported => {
-                log::warn!("Server changed its mind about supporting batching mid-batch...");
-            }
-
             BatchState::InBatch(ref cur_id) => {
                 if cur_id != &batch_id {
                     return Err(ErrorKind::ServerBatchProblem(
@@ -905,12 +902,7 @@ mod test {
         assert_eq!(t.batches[1].records, 1);
         assert_eq!(t.batches[1].bytes, payload_size);
         // We know at this point that the server does not support batching.
-        assert_eq!(t.batches[1].posts[0].batch, None);
-        assert_eq!(t.batches[1].posts[0].commit, false);
-        assert_eq!(
-            t.batches[1].posts[0].body.len(),
-            request_bytes_for_payloads(&[payload_size])
-        );
+        // Removed test that tested for unsupported
     }
 
     // Does the same as the previous test, but with records

@@ -590,6 +590,8 @@ mod test {
         records: usize,
     }
 
+    // Test posting json records,
+    // check if the correct errors fire
     impl PostedData {
         fn records_as_json(&self) -> Vec<serde_json::Value> {
             let values =

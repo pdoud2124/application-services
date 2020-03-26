@@ -1171,6 +1171,13 @@ mod tests {
             password: "test".into(),
             ..Login::default()
         };
+        let login_with_unicode_password = Login{
+            hostname: "https://www.example.com".into(),
+            http_realm: Some("https://www.example.com".into()),
+            username: "test".into(),
+            password: "💖".into(),
+            ..Login::default()
+        };
 
         let test_cases = [
             TestCase {
@@ -1275,6 +1282,12 @@ mod tests {
                 should_err: false,
                 expected_err: "",
             },
+            TestCase {
+                login: login_with_bad_password,
+                should_err: false,
+                expected_err: "",
+            },
+
         ];
 
         for tc in &test_cases {

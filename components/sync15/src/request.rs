@@ -24,10 +24,8 @@ struct LimitTracker {
     cur_records: usize,
 }
 
-// The implementation for the limit, allowing for a new limit,
-// to reset the limit, and keep track of records count in the queue
 impl LimitTracker {
-    // creates a new limit
+    // creates a new, empty, LimitTracker with the given queue size in bytes and records
     pub fn new(max_bytes: usize, max_records: usize) -> LimitTracker {
         LimitTracker {
             max_bytes,
@@ -43,19 +41,19 @@ impl LimitTracker {
         self.cur_bytes = 0;
     }
 
-    // checks if there is space in the queue for a new record
+    // returns true iff this record can be added to the queue
     pub fn can_add_record(&self, payload_size: usize) -> bool {
         // Desktop does the cur_bytes check as exclusive, but we shouldn't see any servers that
         // don't have https://github.com/mozilla-services/server-syncstorage/issues/73
         self.cur_records < self.max_records && self.cur_bytes + payload_size <= self.max_bytes
     }
 
-    // returns a boolean based on the size of a record versus the max space in the queue
+    // returns true iff the record is larger than the maximum size
     pub fn can_never_add(&self, record_size: usize) -> bool {
-        record_size >= self.max_bytes
+        record_size > self.max_bytes
     }
 
-    // updates the count after a record is added
+    // adds a record to the queue
     pub fn record_added(&mut self, record_size: usize) {
         assert!(
             self.can_add_record(record_size),
@@ -105,7 +103,6 @@ fn default_max_record_payload_bytes() -> usize {
     256 * 1024
 }
 
-// Creates a default instance for the info configuration
 impl Default for InfoConfiguration {
     #[inline]
     fn default() -> InfoConfiguration {
@@ -137,7 +134,7 @@ impl Deref for InfoCollections {
     }
 }
 
-// A struct to upload the result of a batch request
+/// The result of a batch upload, containing results for successful and failed updates
 #[derive(Debug, Clone, Deserialize)]
 pub struct UploadResult {
     batch: Option<String>,
@@ -151,14 +148,13 @@ pub struct UploadResult {
 
 pub type PostResponse = Sync15ClientResponse<UploadResult>;
 
-//REMOVE BatchState Unnsupported for issue 1144
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum BatchState {
-    NoBatch,
+    NewBatch,
     InBatch(String),
 }
 
-// The struct holding all the options for the queue
+//Adds and flushes batch to the service
 #[derive(Debug)]
 pub struct PostQueue<Post, OnResponse> {
     poster: Post,
@@ -172,7 +168,6 @@ pub struct PostQueue<Post, OnResponse> {
     last_modified: ServerTimestamp,
 }
 
-// How to deal with a batch
 pub trait BatchPoster {
     /// Note: Last argument (reference to the batch poster) is provided for the purposes of testing
     /// Important: Poster should not report non-success HTTP statuses as errors!!
@@ -193,7 +188,6 @@ pub trait PostResponseHandler {
     fn handle_response(&mut self, r: PostResponse, mid_batch: bool) -> Result<()>;
 }
 
-// A struct defining responses for the batch poster
 #[derive(Debug, Clone)]
 pub(crate) struct NormalResponseHandler {
     pub failed_ids: Vec<Guid>,
@@ -203,7 +197,6 @@ pub(crate) struct NormalResponseHandler {
     pub pending_success: Vec<Guid>,
 }
 
-// The implementation of handling responses for the batcher
 impl NormalResponseHandler {
     pub fn new(allow_failed: bool) -> NormalResponseHandler {
         NormalResponseHandler {
@@ -216,8 +209,6 @@ impl NormalResponseHandler {
     }
 }
 
-// This implementation puts the responses into arrays so they can
-// be accessed after a batch is handled
 impl PostResponseHandler for NormalResponseHandler {
     fn handle_response(&mut self, r: PostResponse, mid_batch: bool) -> error::Result<()> {
         match r {
@@ -260,28 +251,20 @@ where
             last_modified: ts,
             post_limits: LimitTracker::new(config.max_post_bytes, config.max_post_records),
             batch_limits: LimitTracker::new(config.max_total_bytes, config.max_total_records),
-            batch: BatchState::NoBatch,
+            batch: BatchState::NewBatch,
             max_payload_bytes: config.max_record_payload_bytes,
             max_request_bytes: config.max_request_bytes,
             queued: Vec::new(),
         }
     }
 
-    // UPDATED TO NOT ALLOW UNSUPPORTED BATCHSTATE
-    // Determines if there is a batch
-    #[inline]
-    fn in_batch(&self) -> bool {
-        match &self.batch {
-            BatchState::NoBatch => false,
-            _ => true,
-        }
-    }
 
-    // This puts an item into the batch queue
+    /// Returns Ok(true) iff a record is added with no error
+    /// Returns Ok(false) if there is an error 
     pub fn enqueue(&mut self, record: &EncryptedBso) -> Result<bool> {
         let payload_length = record.payload.serialized_len();
 
-        // Checks on payload_lengths and bytes
+        // Returns early if the record can not be submitted with current server limits
         if self.post_limits.can_never_add(payload_length)
             || self.batch_limits.can_never_add(payload_length)
             || payload_length >= self.max_payload_bytes
@@ -321,8 +304,8 @@ where
         // The + 1 is only relevant for the final record, which will have a trailing ']'.
         let item_len = item_end - item_start + 1;
 
-        // Catches errors if the item being put into the batch
-        // is too big for the batch
+        // Check if actual serialized length of the record is too long to ever be submitted with
+        // current server limits
         if item_len >= self.max_request_bytes {
             self.queued.truncate(item_start);
             log::warn!(
@@ -336,8 +319,8 @@ where
         let can_batch_record = self.batch_limits.can_add_record(payload_length);
         let can_send_record = self.queued.len() < self.max_request_bytes;
 
-        // If any of the limits have been breached,
-        // flush the queue of the item breaching the limit
+        // If any of the limits have been exceeded by enqueueing the record, remove the record,
+        // flush the queue, and re-enqueue the record 
         if !can_post_record || !can_send_record || !can_batch_record {
             log::debug!(
                 "PostQueue flushing! (can_post = {}, can_send = {}, can_batch = {})",
@@ -355,32 +338,34 @@ where
             serde_json::to_writer(&mut self.queued, &record).unwrap();
         }
 
-        // If all the error checks pass,
-        // update the current limits
+        // Add the record to the queue tracker
         self.post_limits.record_added(payload_length);
         self.batch_limits.record_added(payload_length);
 
         Ok(true)
     }
 
-    // This flushes/clears certain parts of the batch based on parameters
+
+    /// Returns batchid 
+    #[inline]
+    fn batch_id(&self) -> String {
+        //Return current batch_id or "true", if not already in batch
+        match &self.batch {
+            BatchState::NewBatch => "true".into(),
+            BatchState::InBatch(ref s) => s.clone(),
+        }
+    }
+
+    // Flushes the current queue
+    // want_commit??? TODO 
+    // Returns a TODO 
     pub fn flush(&mut self, want_commit: bool) -> Result<()> {
+        // Return if the queue is empty
         if self.queued.is_empty() {
-            assert!(
-                !self.in_batch(),
-                "Bug: Somehow we're in a batch but have no queued records"
-            );
-            // Nothing to do!
             return Ok(());
         }
 
         self.queued.push(b']');
-        let batch_id = match &self.batch {
-            // First commit in possible batch
-            BatchState::NoBatch => Some("true".into()),
-            // In a batch and we have a batch id.
-            BatchState::InBatch(ref s) => Some(s.clone()),
-        };
 
         log::info!(
             "Posting {} records of {} bytes",
@@ -388,19 +373,18 @@ where
             self.queued.len()
         );
 
-        let is_commit = want_commit && batch_id.is_some();
+        let is_commit = want_commit;
         // Weird syntax for calling a function object that is a property.
         let resp_or_error = self.poster.post(
             self.queued.clone(),
             self.last_modified,
-            batch_id,
+            Some(self.batch_id()),
             is_commit,
             self,
         );
 
         self.queued.truncate(0);
 
-        //Updated to take away unsupported batchstate
         if want_commit{
             self.batch_limits.clear();
         }
@@ -408,8 +392,7 @@ where
 
         let resp = resp_or_error?;
 
-        // A match case for the response from the client,
-        // updating the three param variables for each request
+        // Update last_modified and batch_id on success, or fail
         let (status, last_modified, record) = match resp {
             Sync15ClientResponse::Success {
                 status,
@@ -424,28 +407,23 @@ where
             }
         };
 
-        if want_commit{
-            self.last_modified = last_modified;
-        }
-
         if want_commit {
             log::debug!("Committed batch {:?}", self.batch);
-            self.batch = BatchState::NoBatch;
+            self.batch = BatchState::NewBatch;
             self.on_response.handle_response(resp, false)?;
+            self.last_modified = last_modified;
             return Ok(());
         }
 
         // Error handling for a failed batch
         if status != status_codes::ACCEPTED {
-            if self.in_batch() {
+            if self.batch != BatchState::NewBatch { 
                 return Err(ErrorKind::ServerBatchProblem(
                     "Server responded non-202 success code while a batch was in progress",
                 )
                 .into());
             }
             self.last_modified = last_modified;
-            //Changed BatchState from Unsupported to NoBatch. Does this work?
-            self.batch = BatchState::NoBatch;
             self.batch_limits.clear();
             self.on_response.handle_response(resp, false)?;
             return Ok(());
@@ -460,16 +438,13 @@ where
             .clone();
 
         // Error handling for a batch failing mid batch
-        match &self.batch {
-            BatchState::InBatch(ref cur_id) => {
-                if cur_id != &batch_id {
-                    return Err(ErrorKind::ServerBatchProblem(
-                        "Invalid server response: 202 without a batch ID",
-                    )
-                    .into());
-                }
+        if let BatchState::InBatch(ref cur_id) = self.batch {
+            if cur_id != &batch_id { 
+                return Err(ErrorKind::ServerBatchProblem(
+                    "Invalid server response: 202 without a batch ID",
+                )
+                .into());
             }
-            _ => {}
         }
 
         // Can't change this in match arms without NLL
@@ -482,7 +457,6 @@ where
     }
 }
 
-// A struct used for each piece of information uploaded
 #[derive(Clone)]
 pub struct UploadInfo {
     pub successful_ids: Vec<Guid>,
@@ -490,7 +464,6 @@ pub struct UploadInfo {
     pub modified_timestamp: ServerTimestamp,
 }
 
-// The response of an uploaded queue is recorded here
 impl<Poster> PostQueue<Poster, NormalResponseHandler> {
     // TODO: should take by move
     pub fn completed_upload_info(&mut self) -> UploadInfo {
@@ -520,7 +493,6 @@ impl<Poster> PostQueue<Poster, NormalResponseHandler> {
     }
 }
 
-// All the tests for the batching code
 #[cfg(test)]
 mod test {
     use super::*;
@@ -531,7 +503,6 @@ mod test {
     use std::rc::Rc;
     use url::Url;
 
-    // test that the url is compiled correctly
     #[test]
     fn test_url_building() {
         let base = Url::parse("https://example.com/sync").unwrap();
@@ -915,7 +886,6 @@ mod test {
         assert_eq!(t.batches[1].records, 1);
         assert_eq!(t.batches[1].bytes, payload_size);
         // We know at this point that the server does not support batching.
-        // Removed test that tested for unsupported
     }
 
     // Does the same as the previous test, but with records

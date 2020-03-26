@@ -358,7 +358,7 @@ where
 
     // Flushes the current queue
     // want_commit??? TODO 
-    // Returns a TODO 
+    // Returns OK() if there is no error 
     pub fn flush(&mut self, want_commit: bool) -> Result<()> {
         // Return if the queue is empty
         if self.queued.is_empty() {

@@ -401,7 +401,7 @@ where
         self.queued.truncate(0);
 
         //Updated to take away unsupported batchstate
-        if want_commit{
+        if want_commit {
             self.batch_limits.clear();
         }
         self.post_limits.clear();
@@ -424,7 +424,7 @@ where
             }
         };
 
-        if want_commit{
+        if want_commit {
             self.last_modified = last_modified;
         }
 

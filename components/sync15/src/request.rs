@@ -1257,11 +1257,114 @@ mod test {
             request_bytes_for_payloads(&[100])
         );
     }
+ 
+    #[test]
+    fn test_pq_multi_batch_records_and_bytes() {
+        let cfg = InfoConfiguration {
+            max_post_bytes: 200,
+            max_total_bytes: 300,
+            max_post_records: 2,
+            max_total_records: 3,
+            ..InfoConfiguration::default()
+        };
+        let time = 11_111_111_000;
+        let (mut pq, tester) = pq_test_setup(
+            cfg,
+            time,
+            vec![
+                fake_response(status_codes::ACCEPTED, time, Some("1234")),
+                fake_response(status_codes::ACCEPTED, time + 100_000, Some("1234")), // should commit
+                fake_response(status_codes::ACCEPTED, time + 100_000, Some("abcd")),
+                fake_response(status_codes::ACCEPTED, time + 200_000, Some("abcd")), // should commit
+            ],
+        );
+
+        pq.enqueue(&make_record(100)).unwrap();
+        pq.enqueue(&make_record(100)).unwrap();
+        assert_eq!(pq.last_modified.0, time);
+        // POST
+        pq.enqueue(&make_record(100)).unwrap();
+        // POST + COMMIT
+        pq.enqueue(&make_record(100)).unwrap();
+        assert_eq!(pq.last_modified.0, time + 100_000);
+        pq.enqueue(&make_record(100)).unwrap();
+        assert_eq!(pq.last_modified.0, time + 100_000);
+        pq.flush(true).unwrap(); // COMMIT
+
+        assert_eq!(pq.last_modified.0, time + 200_000);
+
+        let t = tester.borrow();
+        assert!(t.cur_batch.is_none());
+        assert_eq!(t.all_posts.len(), 4);
+        assert_eq!(t.batches.len(), 2);
+        assert_eq!(t.batches[0].posts.len(), 2);
+        assert_eq!(t.batches[1].posts.len(), 1);
+
+        assert_eq!(t.batches[0].records, 3);
+        assert_eq!(t.batches[1].records, 2);
+
+        assert_eq!(t.batches[0].bytes, 300);
+        assert_eq!(t.batches[1].bytes, 200);
+
+        assert_eq!(t.batches[0].posts[0].batch.as_ref().unwrap(), "true");
+        assert_eq!(t.batches[0].posts[0].records, 2);
+        assert_eq!(t.batches[0].posts[0].payload_bytes, 200);
+        assert_eq!(t.batches[0].posts[0].commit, false);
+        assert_eq!(
+            t.batches[0].posts[0].body.len(),
+            request_bytes_for_payloads(&[100, 100])
+        );
+
+        assert_eq!(t.batches[0].posts[1].batch.as_ref().unwrap(), "1234");
+        assert_eq!(t.batches[0].posts[1].records, 1);
+        assert_eq!(t.batches[0].posts[1].payload_bytes, 100);
+        assert_eq!(t.batches[0].posts[1].commit, true);
+        assert_eq!(
+            t.batches[0].posts[1].body.len(),
+            request_bytes_for_payloads(&[100])
+        );
+
+        assert_eq!(t.batches[1].posts[0].batch.as_ref().unwrap(), "true");
+        assert_eq!(t.batches[1].posts[0].records, 2);
+        assert_eq!(t.batches[1].posts[0].payload_bytes, 200);
+        assert_eq!(t.batches[1].posts[0].commit, false);
+        assert_eq!(
+            t.batches[1].posts[0].body.len(),
+            request_bytes_for_payloads(&[100, 100])
+        );
+    }
+    
+    #[test]
+    fn test_error_cases() {
+        let cfg = InfoConfiguration {
+            max_request_bytes: 100,
+            max_total_bytes: 200,
+            max_post_records: 2,
+            ..InfoConfiguration::default()
+        };
+        let time = 11_111_111_000;
+        let (mut pq, tester) = pq_test_setup(
+            cfg,
+            time,
+            vec![fake_response(status_codes::OK, time + 100_000, None)],
+        );
+
+        pq.enqueue(&make_record(100)).unwrap();
+        assert_eq!(pq.enqueue((&make_record(101)).unwrap(), Ok(false)));
+        pq.flush(true).unwrap(); // COMMIT
+
+        assert_eq!(pq.last_modified.0, time + 200_000);
+
+        let t = tester.borrow();
+        assert!(t.cur_batch.is_none());
+        assert_eq!(t.all_posts.len(), 1);
+        assert_eq!(t.batches.len(), 1);
+        assert_eq!(t.batches[0].posts[0].commit, true);
+    }
 
     // TODO: Test
     //
-    // - error cases!!! We don't test our handling of server errors at all!
-    // - mixed bytes/record limits
+    // - edge error cases
     //
     // A lot of these have good examples in test_postqueue.js on deskftop sync
 }

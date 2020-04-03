@@ -25,7 +25,7 @@ struct LimitTracker {
 }
 
 impl LimitTracker {
-    // creates a new, empty, LimitTracker with the given queue size in bytes and records
+    // Creates a new, empty, LimitTracker with the given queue size in bytes and records
     pub fn new(max_bytes: usize, max_records: usize) -> LimitTracker {
         LimitTracker {
             max_bytes,
@@ -35,25 +35,25 @@ impl LimitTracker {
         }
     }
 
-    // resets the limit count
+    // Resets the limit count
     pub fn clear(&mut self) {
         self.cur_records = 0;
         self.cur_bytes = 0;
     }
 
-    // returns true iff this record can be added to the queue
+    // Returns true iff this record can be added to the queue
     pub fn can_add_record(&self, payload_size: usize) -> bool {
         // Desktop does the cur_bytes check as exclusive, but we shouldn't see any servers that
         // don't have https://github.com/mozilla-services/server-syncstorage/issues/73
         self.cur_records < self.max_records && self.cur_bytes + payload_size <= self.max_bytes
     }
 
-    // returns true iff the record is larger than the maximum size
+    // Returns true iff the record is larger than the maximum size
     pub fn can_never_add(&self, record_size: usize) -> bool {
         record_size > self.max_bytes
     }
 
-    // adds a record to the queue
+    // Adds a record to the queue
     pub fn record_added(&mut self, record_size: usize) {
         assert!(
             self.can_add_record(record_size),
@@ -259,8 +259,9 @@ where
     }
 
 
+    /// Adds a record to the queue 
     /// Returns Ok(true) iff a record is added with no error
-    /// Returns Ok(false) if there is an error 
+    /// Returns Ok(false) if a record cannot be submitted with server limits or record is too large
     pub fn enqueue(&mut self, record: &EncryptedBso) -> Result<bool> {
         let payload_length = record.payload.serialized_len();
 
@@ -345,22 +346,17 @@ where
         Ok(true)
     }
 
-
-    /// Returns batchid 
+    //Return current batch_id or "true", if not already in batch
     #[inline]
     fn batch_id(&self) -> String {
-        //Return current batch_id or "true", if not already in batch
         match &self.batch {
             BatchState::NewBatch => "true".into(),
             BatchState::InBatch(ref s) => s.clone(),
         }
     }
 
-    // Flushes the current queue
-    // want_commit??? TODO 
-    // Returns OK() if there is no error 
+    /// Flushes the current queue
     pub fn flush(&mut self, want_commit: bool) -> Result<()> {
-        // Return if the queue is empty
         if self.queued.is_empty() {
             return Ok(());
         }
@@ -373,13 +369,12 @@ where
             self.queued.len()
         );
 
-        let is_commit = want_commit;
         // Weird syntax for calling a function object that is a property.
         let resp_or_error = self.poster.post(
             self.queued.clone(),
             self.last_modified,
             Some(self.batch_id()),
-            is_commit,
+            want_commit, 
             self,
         );
 
@@ -415,7 +410,6 @@ where
             return Ok(());
         }
 
-        // Error handling for a failed batch
         if status != status_codes::ACCEPTED {
             if self.batch != BatchState::NewBatch { 
                 return Err(ErrorKind::ServerBatchProblem(
@@ -561,8 +555,6 @@ mod test {
         records: usize,
     }
 
-    // Test posting json records,
-    // check if the correct errors fire
     impl PostedData {
         fn records_as_json(&self) -> Vec<serde_json::Value> {
             let values =
@@ -591,7 +583,6 @@ mod test {
         cfg: InfoConfiguration,
     }
 
-    // An implementation that tests posting a batch
     type TestPosterRef = Rc<RefCell<TestPoster>>;
     impl TestPoster {
         pub fn new<T>(cfg: &InfoConfiguration, responses: T) -> TestPosterRef
@@ -727,7 +718,6 @@ mod test {
 
     type MockedPostQueue = PostQueue<TestPosterRef, TestPosterRef>;
 
-    // this tests the setup of the postqueue
     fn pq_test_setup(
         cfg: InfoConfiguration,
         lm: i64,
@@ -738,7 +728,6 @@ mod test {
         (pq, tester)
     }
 
-    // tests giving a response to posting a successful batch
     fn fake_response<'a, T: Into<Option<&'a str>>>(status: u16, lm: i64, batch: T) -> PostResponse {
         assert!(status_codes::is_success_code(status));
         Sync15ClientResponse::Success {
@@ -813,7 +802,6 @@ mod test {
             .sum::<usize>()
     }
 
-    // Runs a series of tests on a postqueue
     #[test]
     fn test_pq_basic() {
         let cfg = InfoConfiguration {
@@ -844,10 +832,6 @@ mod test {
         );
     }
 
-    // Tests maxing out a postqueue and tests that
-    // all the error catching works properly
-    #[test]
-    fn test_pq_max_request_bytes_no_batch() {
         let cfg = InfoConfiguration {
             max_request_bytes: 250,
             ..InfoConfiguration::default()
@@ -888,8 +872,6 @@ mod test {
         // We know at this point that the server does not support batching.
     }
 
-    // Does the same as the previous test, but with records
-    // instead of requests
     #[test]
     fn test_pq_max_record_payload_bytes_no_batch() {
         let cfg = InfoConfiguration {
@@ -928,7 +910,6 @@ mod test {
         );
     }
 
-    // Testing if a single batch works
     #[test]
     fn test_pq_single_batch() {
         let cfg = InfoConfiguration::default();
@@ -964,7 +945,6 @@ mod test {
         );
     }
 
-    // Tests multiple batches of certain sizes
     #[test]
     fn test_pq_multi_post_batch_bytes() {
         let cfg = InfoConfiguration {
@@ -1291,7 +1271,7 @@ mod test {
         assert_eq!(pq.last_modified.0, time + 100_000);
         pq.flush(true).unwrap(); // COMMIT
 
-        assert_eq!(pq.last_modified.0, time + 200_000);
+        assert_eq!(pq.last_modified.0, time + 100_000);
 
         let t = tester.borrow();
         assert!(t.cur_batch.is_none());
@@ -1350,10 +1330,10 @@ mod test {
         );
 
         pq.enqueue(&make_record(100)).unwrap();
-        assert_eq!(pq.enqueue((&make_record(101)).unwrap(), Ok(false)));
+        assert_eq!(pq.enqueue(&make_record(101)).unwrap(), false);
         pq.flush(true).unwrap(); // COMMIT
 
-        assert_eq!(pq.last_modified.0, time + 200_000);
+        assert_eq!(pq.last_modified.0, time);
 
         let t = tester.borrow();
         assert!(t.cur_batch.is_none());

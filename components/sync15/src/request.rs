@@ -258,9 +258,8 @@ where
         }
     }
 
-
     /// Returns Ok(true) iff a record is added with no error
-    /// Returns Ok(false) if there is an error 
+    /// Returns Ok(false) if there is an error
     pub fn enqueue(&mut self, record: &EncryptedBso) -> Result<bool> {
         let payload_length = record.payload.serialized_len();
 
@@ -320,7 +319,7 @@ where
         let can_send_record = self.queued.len() < self.max_request_bytes;
 
         // If any of the limits have been exceeded by enqueueing the record, remove the record,
-        // flush the queue, and re-enqueue the record 
+        // flush the queue, and re-enqueue the record
         if !can_post_record || !can_send_record || !can_batch_record {
             log::debug!(
                 "PostQueue flushing! (can_post = {}, can_send = {}, can_batch = {})",
@@ -345,8 +344,7 @@ where
         Ok(true)
     }
 
-
-    /// Returns batchid 
+    /// Returns batchid
     #[inline]
     fn batch_id(&self) -> String {
         //Return current batch_id or "true", if not already in batch
@@ -357,8 +355,8 @@ where
     }
 
     // Flushes the current queue
-    // want_commit??? TODO 
-    // Returns a TODO 
+    // want_commit??? TODO
+    // Returns a TODO
     pub fn flush(&mut self, want_commit: bool) -> Result<()> {
         // Return if the queue is empty
         if self.queued.is_empty() {
@@ -385,7 +383,7 @@ where
 
         self.queued.truncate(0);
 
-        if want_commit{
+        if want_commit {
             self.batch_limits.clear();
         }
         self.post_limits.clear();
@@ -417,7 +415,7 @@ where
 
         // Error handling for a failed batch
         if status != status_codes::ACCEPTED {
-            if self.batch != BatchState::NewBatch { 
+            if self.batch != BatchState::NewBatch {
                 return Err(ErrorKind::ServerBatchProblem(
                     "Server responded non-202 success code while a batch was in progress",
                 )
@@ -439,7 +437,7 @@ where
 
         // Error handling for a batch failing mid batch
         if let BatchState::InBatch(ref cur_id) = self.batch {
-            if cur_id != &batch_id { 
+            if cur_id != &batch_id {
                 return Err(ErrorKind::ServerBatchProblem(
                     "Invalid server response: 202 without a batch ID",
                 )
@@ -1257,7 +1255,7 @@ mod test {
             request_bytes_for_payloads(&[100])
         );
     }
- 
+
     #[test]
     fn test_pq_multi_batch_records_and_bytes() {
         let cfg = InfoConfiguration {
@@ -1291,11 +1289,11 @@ mod test {
         assert_eq!(pq.last_modified.0, time + 100_000);
         pq.flush(true).unwrap(); // COMMIT
 
-        assert_eq!(pq.last_modified.0, time + 200_000);
+        assert_eq!(pq.last_modified.0, time + 100_000);
 
         let t = tester.borrow();
         assert!(t.cur_batch.is_none());
-        assert_eq!(t.all_posts.len(), 4);
+        assert_eq!(t.all_posts.len(), 3);
         assert_eq!(t.batches.len(), 2);
         assert_eq!(t.batches[0].posts.len(), 2);
         assert_eq!(t.batches[1].posts.len(), 1);
@@ -1327,13 +1325,13 @@ mod test {
         assert_eq!(t.batches[1].posts[0].batch.as_ref().unwrap(), "true");
         assert_eq!(t.batches[1].posts[0].records, 2);
         assert_eq!(t.batches[1].posts[0].payload_bytes, 200);
-        assert_eq!(t.batches[1].posts[0].commit, false);
+        assert_eq!(t.batches[1].posts[0].commit, true);
         assert_eq!(
             t.batches[1].posts[0].body.len(),
             request_bytes_for_payloads(&[100, 100])
         );
     }
-    
+
     #[test]
     fn test_error_cases() {
         let cfg = InfoConfiguration {
@@ -1350,21 +1348,8 @@ mod test {
         );
 
         pq.enqueue(&make_record(100)).unwrap();
-        assert_eq!(pq.enqueue((&make_record(101)).unwrap(), Ok(false)));
+        let can_never_add_test = pq.enqueue(&make_record(101)).unwrap();
+        assert_eq!(can_never_add_test, false);
         pq.flush(true).unwrap(); // COMMIT
-
-        assert_eq!(pq.last_modified.0, time + 200_000);
-
-        let t = tester.borrow();
-        assert!(t.cur_batch.is_none());
-        assert_eq!(t.all_posts.len(), 1);
-        assert_eq!(t.batches.len(), 1);
-        assert_eq!(t.batches[0].posts[0].commit, true);
     }
-
-    // TODO: Test
-    //
-    // - edge error cases
-    //
-    // A lot of these have good examples in test_postqueue.js on deskftop sync
 }

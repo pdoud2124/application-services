@@ -1318,19 +1318,34 @@ mod test {
         let cfg = InfoConfiguration {
             max_request_bytes: 100,
             max_total_bytes: 200,
-            max_post_records: 2,
+            max_post_records: 3,
+            max_total_records: 3,
             ..InfoConfiguration::default()
         };
         let time = 11_111_111_000;
-        let (mut pq, tester) = pq_test_setup(
+        let (mut pq, _tester) = pq_test_setup(
             cfg,
             time,
             vec![fake_response(status_codes::OK, time + 100_000, None)],
         );
 
-        pq.enqueue(&make_record(100)).unwrap();
+        // Test error catch for going over max_request_bytes
         let can_never_add_test = pq.enqueue(&make_record(101)).unwrap();
         assert_eq!(can_never_add_test, false);
+        pq.flush(true).unwrap(); // COMMIT
+
+        // Test error catch for going over max_total_bytes.
+        pq.enqueue(&make_record(100)).unwrap();
+        let at_max_total_bytes = pq.enqueue(&make_record(101)).unwrap();
+        assert_eq!(at_max_total_bytes, false);
+        pq.flush(true).unwrap(); // COMMIT
+
+        // // Test going over max_post_bytes and max_total_records
+        pq.enqueue(&make_record(50)).unwrap();
+        pq.enqueue(&make_record(50)).unwrap();
+        pq.enqueue(&make_record(50)).unwrap();
+        let too_many_post_records = pq.enqueue(&make_record(50)).unwrap();
+        assert_eq!(too_many_post_records, false);
         pq.flush(true).unwrap(); // COMMIT
     }
 }

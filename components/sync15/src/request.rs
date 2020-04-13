@@ -154,7 +154,7 @@ pub enum BatchState {
     InBatch(String),
 }
 
-//Adds and flushes batch to the service
+// Adds and flushes batch to the service
 #[derive(Debug)]
 pub struct PostQueue<Post, OnResponse> {
     poster: Post,
@@ -262,6 +262,7 @@ where
     /// Adds a record to the queue 
     /// Returns Ok(true) iff a record is added with no error
     /// Returns Ok(false) if a record cannot be submitted with server limits or record is too large
+    /// Returns Error if any of the limits have been exceeded by enqueueing a record 
     pub fn enqueue(&mut self, record: &EncryptedBso) -> Result<bool> {
         let payload_length = record.payload.serialized_len();
 
@@ -346,7 +347,7 @@ where
         Ok(true)
     }
 
-    //Return current batch_id or "true", if not already in batch
+    // Return current batch_id or "true", if not already in batch
     #[inline]
     fn batch_id(&self) -> String {
         match &self.batch {
@@ -431,7 +432,7 @@ where
             })?
             .clone();
 
-        // Error handling for a batch failing mid batch
+        // If we are in a batch, fail if there is an id mismatch
         if let BatchState::InBatch(ref cur_id) = self.batch {
             if cur_id != &batch_id {
                 return Err(ErrorKind::ServerBatchProblem(

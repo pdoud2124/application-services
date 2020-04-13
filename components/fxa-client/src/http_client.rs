@@ -11,6 +11,8 @@ use serde_json::json;
 use std::collections::HashMap;
 use url::Url;
 use viaduct::{header_names, status_codes, Method, Request, Response};
+use std::time::{Duration, SystemTime};
+use std::tread::sleep;
 
 const HAWK_HKDF_SALT: [u8; 32] = [0b0; 32];
 const HAWK_KEY_LENGTH: usize = 32;
@@ -125,6 +127,23 @@ impl FxAClient for Client {
             etag,
             response: resp.json()?,
         }))
+    }
+    fn listAttachedOAuthClients(
+        &self,
+        config: &Config,
+        session_token: &str,
+        client_id: &str,
+        refresh_token: &str,
+        device_id: &str,
+    ) -> Result<OAuthTokenResponse> {
+        const ONE_DAY = 24 * 60 * 60 * 100;
+        let now = Systemtime::now();
+        let body = json!({
+            "client_id": config.client_id,
+            "lastAccessedDaysAgo": config.approximateLastAccessTime
+        });
+
+
     }
 
     // For the one-off generation of a `refresh_token` and associated meta from transient credentials.
@@ -712,7 +731,7 @@ pub struct ScopedKeyDataResponse {
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DuplicateTokenResponse {
     pub uid: String,
-    #[serde(rename = "sessionToken")]
+    #[serde(rename = "")]
     pub session_token: String,
     pub verified: bool,
     #[serde(rename = "authAt")]

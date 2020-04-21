@@ -11,6 +11,8 @@ use serde_json::json;
 use std::collections::HashMap;
 use url::Url;
 use viaduct::{header_names, status_codes, Method, Request, Response};
+use std::time::{Duration, SystemTime};
+use std::tread::sleep;
 
 const HAWK_HKDF_SALT: [u8; 32] = [0b0; 32];
 const HAWK_KEY_LENGTH: usize = 32;
@@ -29,6 +31,11 @@ pub trait FxAClient {
         session_token: &str,
         scopes: &[&str],
     ) -> Result<OAuthTokenResponse>;
+    fn listAttachedOAuthClients(
+        &self,
+        config: &Config,
+        session_token: &str,
+    ) -> Result<AttachedClientsResponse>
     fn oauth_introspect_refresh_token(
         &self,
         config: &Config,
@@ -126,6 +133,7 @@ impl FxAClient for Client {
             response: resp.json()?,
         }))
     }
+
 
     // For the one-off generation of a `refresh_token` and associated meta from transient credentials.
 
@@ -307,6 +315,27 @@ impl FxAClient for Client {
         Ok(())
     }
 
+    fn listAttachedOAuthClients(
+        &self,
+        config: &Config,
+        session_token: &str,
+    ) -> Result<AttachedClientsResponse> {
+        let body = json!({
+            "client_id": clientId
+            "device_id": deviceId
+            "sessionTokenid": sessionTokenId
+            "refresh_token": refreshTokenId
+        });
+        let key = derive_auth_key_from_session_token(session_token)?;
+        let url = config.auth_url_path("v1/account/sessions")?;
+        let request = HawkRequestBuilder::new(Method::Get, url, &key)
+            .body(body.to_string());
+
+        Ok(Self::make_request(request)?.json()?)
+
+
+    }
+
     fn devices(&self, config: &Config, refresh_token: &str) -> Result<Vec<GetDeviceResponse>> {
         let url = config.auth_url_path("v1/account/devices")?;
         let request =
@@ -401,6 +430,7 @@ impl Client {
         }
     }
 }
+
 
 fn bearer_token(token: &str) -> String {
     format!("Bearer {}", token)
@@ -658,6 +688,14 @@ pub struct DeviceResponseCommon {
     pub push_endpoint_expired: bool,
 }
 
+#[derive(Deserialize, Debug)]
+pub struct AttachedClientsResponse {
+    pub client_id: Option<String>,
+    pub session_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub device_id: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct OAuthTokenResponse {
     pub keys_jwe: Option<String>,
@@ -712,7 +750,7 @@ pub struct ScopedKeyDataResponse {
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DuplicateTokenResponse {
     pub uid: String,
-    #[serde(rename = "sessionToken")]
+    #[serde(rename = "")]
     pub session_token: String,
     pub verified: bool,
     #[serde(rename = "authAt")]

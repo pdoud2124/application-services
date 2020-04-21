@@ -31,6 +31,13 @@ pub trait FxAClient {
         session_token: &str,
         scopes: &[&str],
     ) -> Result<OAuthTokenResponse>;
+    fn listAttachedOAuthClients(
+        &self,
+        config: &Config,
+        session_token: &str,
+        client_id: &str,
+        device_id: &str,
+    ) -> Result<OAuthTokenResponse>
     fn oauth_introspect_refresh_token(
         &self,
         config: &Config,
@@ -133,11 +140,11 @@ impl FxAClient for Client {
         config: &Config,
         session_token: &str,
         client_id: &str,
-        refresh_token: &str,
         device_id: &str,
     ) -> Result<OAuthTokenResponse> {
-        const ONE_DAY = 24 * 60 * 60 * 100;
-        let now = Systemtime::now();
+        let url = config.auth_url_path("v1/account/sessions")?;
+        let request =
+            Request::get(url).header(header_names::AUTHORIZATION, session_token(session_token))?;
         let body = json!({
             "client_id": config.client_id,
             "lastAccessedDaysAgo": config.approximateLastAccessTime

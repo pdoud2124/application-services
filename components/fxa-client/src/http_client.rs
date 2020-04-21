@@ -35,9 +35,7 @@ pub trait FxAClient {
         &self,
         config: &Config,
         session_token: &str,
-        client_id: &str,
-        device_id: &str,
-    ) -> Result<OAuthTokenResponse>
+    ) -> Result<AttachedClientsResponse>
     fn oauth_introspect_refresh_token(
         &self,
         config: &Config,
@@ -135,23 +133,7 @@ impl FxAClient for Client {
             response: resp.json()?,
         }))
     }
-    fn listAttachedOAuthClients(
-        &self,
-        config: &Config,
-        session_token: &str,
-        client_id: &str,
-        device_id: &str,
-    ) -> Result<OAuthTokenResponse> {
-        let url = config.auth_url_path("v1/account/sessions")?;
-        let request =
-            Request::get(url).header(header_names::AUTHORIZATION, session_token(session_token))?;
-        let body = json!({
-            "client_id": config.client_id,
-            "lastAccessedDaysAgo": config.approximateLastAccessTime
-        });
 
-
-    }
 
     // For the one-off generation of a `refresh_token` and associated meta from transient credentials.
 
@@ -333,6 +315,27 @@ impl FxAClient for Client {
         Ok(())
     }
 
+    fn listAttachedOAuthClients(
+        &self,
+        config: &Config,
+        session_token: &str,
+    ) -> Result<AttachedClientsResponse> {
+        let body = json!({
+            "client_id": clientId
+            "device_id": deviceId
+            "sessionTokenid": sessionTokenId
+            "refresh_token": refreshTokenId
+        });
+        let key = derive_auth_key_from_session_token(session_token)?;
+        let url = config.auth_url_path("v1/account/sessions")?;
+        let request = HawkRequestBuilder::new(Method::Get, url, &key)
+            .body(body.to_string());
+
+        Ok(Self::make_request(request)?.json()?)
+
+
+    }
+
     fn devices(&self, config: &Config, refresh_token: &str) -> Result<Vec<GetDeviceResponse>> {
         let url = config.auth_url_path("v1/account/devices")?;
         let request =
@@ -427,6 +430,7 @@ impl Client {
         }
     }
 }
+
 
 fn bearer_token(token: &str) -> String {
     format!("Bearer {}", token)
@@ -682,6 +686,14 @@ pub struct DeviceResponseCommon {
     pub available_commands: HashMap<String, String>,
     #[serde(rename = "pushEndpointExpired")]
     pub push_endpoint_expired: bool,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct AttachedClientsResponse {
+    pub client_id: Option<String>,
+    pub session_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub device_id: Option<String>,
 }
 
 #[derive(Deserialize)]

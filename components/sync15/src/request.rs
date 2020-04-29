@@ -25,6 +25,7 @@ struct LimitTracker {
 }
 
 impl LimitTracker {
+    // Creates a new, empty, LimitTracker with the given queue size in bytes and records
     pub fn new(max_bytes: usize, max_records: usize) -> LimitTracker {
         LimitTracker {
             max_bytes,
@@ -34,21 +35,25 @@ impl LimitTracker {
         }
     }
 
+    // Resets the limit count
     pub fn clear(&mut self) {
         self.cur_records = 0;
         self.cur_bytes = 0;
     }
 
+    // Returns true iff this record can be added to the queue
     pub fn can_add_record(&self, payload_size: usize) -> bool {
         // Desktop does the cur_bytes check as exclusive, but we shouldn't see any servers that
         // don't have https://github.com/mozilla-services/server-syncstorage/issues/73
         self.cur_records < self.max_records && self.cur_bytes + payload_size <= self.max_bytes
     }
 
+    // Returns true iff the record is larger than the maximum size
     pub fn can_never_add(&self, record_size: usize) -> bool {
-        record_size >= self.max_bytes
+        record_size > self.max_bytes
     }
 
+    // Adds a record to the queue
     pub fn record_added(&mut self, record_size: usize) {
         assert!(
             self.can_add_record(record_size),
@@ -129,6 +134,7 @@ impl Deref for InfoCollections {
     }
 }
 
+/// The result of a batch upload, containing results for successful and failed updates
 #[derive(Debug, Clone, Deserialize)]
 pub struct UploadResult {
     batch: Option<String>,
@@ -144,11 +150,11 @@ pub type PostResponse = Sync15ClientResponse<UploadResult>;
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum BatchState {
-    Unsupported,
-    NoBatch,
+    NewBatch,
     InBatch(String),
 }
 
+// Adds and flushes batch to the service
 #[derive(Debug)]
 pub struct PostQueue<Post, OnResponse> {
     poster: Post,
@@ -227,6 +233,7 @@ impl PostResponseHandler for NormalResponseHandler {
     }
 }
 
+// The main function that posts the batch queue
 impl<Poster, OnResponse> PostQueue<Poster, OnResponse>
 where
     Poster: BatchPoster,
@@ -244,24 +251,22 @@ where
             last_modified: ts,
             post_limits: LimitTracker::new(config.max_post_bytes, config.max_post_records),
             batch_limits: LimitTracker::new(config.max_total_bytes, config.max_total_records),
-            batch: BatchState::NoBatch,
+            batch: BatchState::NewBatch,
             max_payload_bytes: config.max_record_payload_bytes,
             max_request_bytes: config.max_request_bytes,
             queued: Vec::new(),
         }
     }
 
-    #[inline]
-    fn in_batch(&self) -> bool {
-        match &self.batch {
-            BatchState::Unsupported | BatchState::NoBatch => false,
-            _ => true,
-        }
-    }
 
+    /// Adds a record to the queue 
+    /// Returns Ok(true) iff a record is added with no error
+    /// Returns Ok(false) if a record cannot be submitted with server limits or record is too large
+    /// Returns Error if any of the limits have been exceeded by enqueueing a record 
     pub fn enqueue(&mut self, record: &EncryptedBso) -> Result<bool> {
         let payload_length = record.payload.serialized_len();
 
+        // Returns early if the record can not be submitted with current server limits
         if self.post_limits.can_never_add(payload_length)
             || self.batch_limits.can_never_add(payload_length)
             || payload_length >= self.max_payload_bytes
@@ -301,6 +306,8 @@ where
         // The + 1 is only relevant for the final record, which will have a trailing ']'.
         let item_len = item_end - item_start + 1;
 
+        // Check if actual serialized length of the record is too long to ever be submitted with
+        // current server limits
         if item_len >= self.max_request_bytes {
             self.queued.truncate(item_start);
             log::warn!(
@@ -314,6 +321,8 @@ where
         let can_batch_record = self.batch_limits.can_add_record(payload_length);
         let can_send_record = self.queued.len() < self.max_request_bytes;
 
+        // If any of the limits have been exceeded by enqueueing the record, remove the record,
+        // flush the queue, and re-enqueue the record
         if !can_post_record || !can_send_record || !can_batch_record {
             log::debug!(
                 "PostQueue flushing! (can_post = {}, can_send = {}, can_batch = {})",
@@ -331,31 +340,29 @@ where
             serde_json::to_writer(&mut self.queued, &record).unwrap();
         }
 
+        // Add the record to the queue tracker
         self.post_limits.record_added(payload_length);
         self.batch_limits.record_added(payload_length);
 
         Ok(true)
     }
 
+    // Return current batch_id or "true", if not already in batch
+    #[inline]
+    fn batch_id(&self) -> String {
+        match &self.batch {
+            BatchState::NewBatch => "true".into(),
+            BatchState::InBatch(ref s) => s.clone(),
+        }
+    }
+
+    /// Flushes the current queue
     pub fn flush(&mut self, want_commit: bool) -> Result<()> {
         if self.queued.is_empty() {
-            assert!(
-                !self.in_batch(),
-                "Bug: Somehow we're in a batch but have no queued records"
-            );
-            // Nothing to do!
             return Ok(());
         }
 
         self.queued.push(b']');
-        let batch_id = match &self.batch {
-            // Not the first post and we know we have no batch semantics.
-            BatchState::Unsupported => None,
-            // First commit in possible batch
-            BatchState::NoBatch => Some("true".into()),
-            // In a batch and we have a batch id.
-            BatchState::InBatch(ref s) => Some(s.clone()),
-        };
 
         log::info!(
             "Posting {} records of {} bytes",
@@ -363,25 +370,25 @@ where
             self.queued.len()
         );
 
-        let is_commit = want_commit && batch_id.is_some();
         // Weird syntax for calling a function object that is a property.
         let resp_or_error = self.poster.post(
             self.queued.clone(),
             self.last_modified,
-            batch_id,
-            is_commit,
+            Some(self.batch_id()),
+            want_commit, 
             self,
         );
 
         self.queued.truncate(0);
 
-        if want_commit || self.batch == BatchState::Unsupported {
+        if want_commit {
             self.batch_limits.clear();
         }
         self.post_limits.clear();
 
         let resp = resp_or_error?;
 
+        // Update last_modified and batch_id on success, or fail
         let (status, last_modified, record) = match resp {
             Sync15ClientResponse::Success {
                 status,
@@ -396,26 +403,22 @@ where
             }
         };
 
-        if want_commit || self.batch == BatchState::Unsupported {
-            self.last_modified = last_modified;
-        }
-
         if want_commit {
             log::debug!("Committed batch {:?}", self.batch);
-            self.batch = BatchState::NoBatch;
+            self.batch = BatchState::NewBatch;
             self.on_response.handle_response(resp, false)?;
+            self.last_modified = last_modified;
             return Ok(());
         }
 
         if status != status_codes::ACCEPTED {
-            if self.in_batch() {
+            if self.batch != BatchState::NewBatch {
                 return Err(ErrorKind::ServerBatchProblem(
                     "Server responded non-202 success code while a batch was in progress",
                 )
                 .into());
             }
             self.last_modified = last_modified;
-            self.batch = BatchState::Unsupported;
             self.batch_limits.clear();
             self.on_response.handle_response(resp, false)?;
             return Ok(());
@@ -429,20 +432,14 @@ where
             })?
             .clone();
 
-        match &self.batch {
-            BatchState::Unsupported => {
-                log::warn!("Server changed its mind about supporting batching mid-batch...");
+        // If we are in a batch, fail if there is an id mismatch
+        if let BatchState::InBatch(ref cur_id) = self.batch {
+            if cur_id != &batch_id {
+                return Err(ErrorKind::ServerBatchProblem(
+                    "Invalid server response: 202 without a batch ID",
+                )
+                .into());
             }
-
-            BatchState::InBatch(ref cur_id) => {
-                if cur_id != &batch_id {
-                    return Err(ErrorKind::ServerBatchProblem(
-                        "Invalid server response: 202 without a batch ID",
-                    )
-                    .into());
-                }
-            }
-            _ => {}
         }
 
         // Can't change this in match arms without NLL
@@ -500,6 +497,7 @@ mod test {
     use std::collections::VecDeque;
     use std::rc::Rc;
     use url::Url;
+
     #[test]
     fn test_url_building() {
         let base = Url::parse("https://example.com/sync").unwrap();
@@ -833,10 +831,7 @@ mod test {
             t.batches[0].posts[0].body.len(),
             request_bytes_for_payloads(&[100])
         );
-    }
 
-    #[test]
-    fn test_pq_max_request_bytes_no_batch() {
         let cfg = InfoConfiguration {
             max_request_bytes: 250,
             ..InfoConfiguration::default()
@@ -875,12 +870,6 @@ mod test {
         assert_eq!(t.batches[1].records, 1);
         assert_eq!(t.batches[1].bytes, payload_size);
         // We know at this point that the server does not support batching.
-        assert_eq!(t.batches[1].posts[0].batch, None);
-        assert_eq!(t.batches[1].posts[0].commit, false);
-        assert_eq!(
-            t.batches[1].posts[0].body.len(),
-            request_bytes_for_payloads(&[payload_size])
-        );
     }
 
     #[test]
@@ -1005,6 +994,8 @@ mod test {
         );
     }
 
+    // Runs the same test as above, but with records
+    // instead of size
     #[test]
     fn test_pq_multi_post_batch_records() {
         let cfg = InfoConfiguration {
@@ -1069,6 +1060,8 @@ mod test {
         );
     }
 
+    // Tests running multiple post queues on multiple batches,
+    // tests it specifically changing records
     #[test]
     #[allow(clippy::cognitive_complexity)]
     fn test_pq_multi_post_multi_batch_records() {
@@ -1153,6 +1146,8 @@ mod test {
         );
     }
 
+    // Tests running multiple post queues on multiple batches,
+    // tests it specifically changing bytes
     #[test]
     #[allow(clippy::cognitive_complexity)]
     fn test_pq_multi_post_multi_batch_bytes() {
@@ -1243,10 +1238,115 @@ mod test {
         );
     }
 
-    // TODO: Test
-    //
-    // - error cases!!! We don't test our handling of server errors at all!
-    // - mixed bytes/record limits
-    //
-    // A lot of these have good examples in test_postqueue.js on deskftop sync
+    #[test]
+    fn test_pq_multi_batch_records_and_bytes() {
+        let cfg = InfoConfiguration {
+            max_post_bytes: 200,
+            max_total_bytes: 300,
+            max_post_records: 2,
+            max_total_records: 3,
+            ..InfoConfiguration::default()
+        };
+        let time = 11_111_111_000;
+        let (mut pq, tester) = pq_test_setup(
+            cfg,
+            time,
+            vec![
+                fake_response(status_codes::ACCEPTED, time, Some("1234")),
+                fake_response(status_codes::ACCEPTED, time + 100_000, Some("1234")), // should commit
+                fake_response(status_codes::ACCEPTED, time + 100_000, Some("abcd")),
+                fake_response(status_codes::ACCEPTED, time + 200_000, Some("abcd")), // should commit
+            ],
+        );
+
+        pq.enqueue(&make_record(100)).unwrap();
+        pq.enqueue(&make_record(100)).unwrap();
+        assert_eq!(pq.last_modified.0, time);
+        // POST
+        pq.enqueue(&make_record(100)).unwrap();
+        // POST + COMMIT
+        pq.enqueue(&make_record(100)).unwrap();
+        assert_eq!(pq.last_modified.0, time + 100_000);
+        pq.enqueue(&make_record(100)).unwrap();
+        assert_eq!(pq.last_modified.0, time + 100_000);
+        pq.flush(true).unwrap(); // COMMIT
+
+        assert_eq!(pq.last_modified.0, time + 100_000);
+
+        let t = tester.borrow();
+        assert!(t.cur_batch.is_none());
+        assert_eq!(t.all_posts.len(), 3);
+        assert_eq!(t.batches.len(), 2);
+        assert_eq!(t.batches[0].posts.len(), 2);
+        assert_eq!(t.batches[1].posts.len(), 1);
+
+        assert_eq!(t.batches[0].records, 3);
+        assert_eq!(t.batches[1].records, 2);
+
+        assert_eq!(t.batches[0].bytes, 300);
+        assert_eq!(t.batches[1].bytes, 200);
+
+        assert_eq!(t.batches[0].posts[0].batch.as_ref().unwrap(), "true");
+        assert_eq!(t.batches[0].posts[0].records, 2);
+        assert_eq!(t.batches[0].posts[0].payload_bytes, 200);
+        assert_eq!(t.batches[0].posts[0].commit, false);
+        assert_eq!(
+            t.batches[0].posts[0].body.len(),
+            request_bytes_for_payloads(&[100, 100])
+        );
+
+        assert_eq!(t.batches[0].posts[1].batch.as_ref().unwrap(), "1234");
+        assert_eq!(t.batches[0].posts[1].records, 1);
+        assert_eq!(t.batches[0].posts[1].payload_bytes, 100);
+        assert_eq!(t.batches[0].posts[1].commit, true);
+        assert_eq!(
+            t.batches[0].posts[1].body.len(),
+            request_bytes_for_payloads(&[100])
+        );
+
+        assert_eq!(t.batches[1].posts[0].batch.as_ref().unwrap(), "true");
+        assert_eq!(t.batches[1].posts[0].records, 2);
+        assert_eq!(t.batches[1].posts[0].payload_bytes, 200);
+        assert_eq!(t.batches[1].posts[0].commit, true);
+        assert_eq!(
+            t.batches[1].posts[0].body.len(),
+            request_bytes_for_payloads(&[100, 100])
+        );
+    }
+
+    #[test]
+    fn test_error_cases() {
+        let cfg = InfoConfiguration {
+            max_request_bytes: 100,
+            max_total_bytes: 200,
+            max_post_records: 3,
+            max_total_records: 3,
+            ..InfoConfiguration::default()
+        };
+        let time = 11_111_111_000;
+        let (mut pq, _tester) = pq_test_setup(
+            cfg,
+            time,
+            vec![fake_response(status_codes::OK, time + 100_000, None)],
+        );
+
+        // Test error catch for going over max_request_bytes
+        let can_never_add_test = pq.enqueue(&make_record(101)).unwrap();
+        assert_eq!(can_never_add_test, false);
+        pq.flush(true).unwrap(); // COMMIT
+
+        // Test error catch for going over max_total_bytes.
+        pq.enqueue(&make_record(100)).unwrap();
+        let at_max_total_bytes = pq.enqueue(&make_record(101)).unwrap();
+        assert_eq!(at_max_total_bytes, false);
+        pq.flush(true).unwrap(); // COMMIT
+
+        // // Test going over max_post_bytes and max_total_records
+        pq.enqueue(&make_record(50)).unwrap();
+        pq.enqueue(&make_record(50)).unwrap();
+        pq.enqueue(&make_record(50)).unwrap();
+        let too_many_post_records = pq.enqueue(&make_record(50)).unwrap();
+        assert_eq!(too_many_post_records, false);
+        pq.flush(true).unwrap(); // COMMIT
+    }
 }
